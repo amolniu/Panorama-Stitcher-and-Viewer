@@ -1,0 +1,17 @@
+# Source is LF everywhere; keep it that way on checkout regardless of the
+# machine's core.autocrlf setting.
+* text=auto eol=lf
+
+# Binary assets
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.tif binary
+*.tiff binary
+*.mp4 binary
+*.wasm binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

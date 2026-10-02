@@ -1,0 +1,8 @@
+# Core
+numpy
+pillow
+scipy
+
+# Optional: offline place names on print plates (bundles a ~8 MB GeoNames gazetteer).
+# Without it, prints simply have no derived title and everything else works unchanged.
+reverse_geocoder

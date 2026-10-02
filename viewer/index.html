@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Drone Panoramas</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: rgba(18, 22, 29, 0.82);
+    --panel-solid: #12161d;
+    --line: rgba(255, 255, 255, 0.10);
+    --text: #e8ecf2;
+    --dim: #97a1b0;
+    --accent: #5bb0ff;
+    --good: #57c785;
+    --ok: #d8b24a;
+    --poor: #e0705f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #stage:active { cursor: grabbing; }
+
+  .chrome { position: fixed; z-index: 5; transition: opacity .25s ease; }
+  body.chrome-hidden .chrome { opacity: 0; pointer-events: none; }
+
+  /* ---- top bar ---- */
+  #top {
+    top: 0; left: 0; right: 0;
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 16px;
+    background: linear-gradient(180deg, rgba(8,10,14,.86), rgba(8,10,14,0));
+  }
+  #title { font-weight: 600; font-size: 15px; letter-spacing: .01em; }
+  #meta { color: var(--dim); font-size: 12.5px; }
+  .quality { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); }
+  .quality.good { color: var(--good); border-color: rgba(87,199,133,.4); }
+  .quality.ok   { color: var(--ok);   border-color: rgba(216,178,74,.4); }
+  .quality.poor { color: var(--poor); border-color: rgba(224,112,95,.45); }
+  .spacer { flex: 1; }
+  a#mapLink { color: var(--dim); text-decoration: none; font-size: 12.5px; border-bottom: 1px dotted var(--line); }
+  a#mapLink:hover { color: var(--accent); }
+
+  /* ---- buttons ---- */
+  button {
+    font: inherit; color: var(--text);
+    background: rgba(255,255,255,.055);
+    border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 11px; cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  button:hover:not(:disabled) { background: rgba(255,255,255,.11); }
+  button.on { background: rgba(91,176,255,.18); border-color: rgba(91,176,255,.55); color: #cfe6ff; }
+  button:disabled { opacity: .32; cursor: not-allowed; }
+
+  /* ---- bottom controls ---- */
+  #bottom {
+    left: 0; right: 0; bottom: 0;
+    padding: 14px 16px 16px;
+    background: linear-gradient(0deg, rgba(8,10,14,.9), rgba(8,10,14,0));
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  #modes { display: flex; flex-wrap: wrap; gap: 6px; }
+  #nearby { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #nearby button { font-size: 12px; padding: 4px 9px; border-radius: 999px; }
+  .nearby-label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); margin-right: 2px; }
+  #modeBlurb { color: var(--dim); font-size: 12.5px; min-height: 18px; }
+  #sliders { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+  label.sl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dim); }
+  input[type=range] { width: 150px; accent-color: var(--accent); }
+
+  /* ---- gallery ---- */
+  #gallery {
+    position: fixed; z-index: 8; inset: 0 0 0 auto; width: min(430px, 92vw);
+    background: var(--panel-solid); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; transform: translateX(100%);
+    transition: transform .28s cubic-bezier(.4,0,.2,1);
+  }
+  body.browsing #gallery { transform: none; }
+  .trip { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 16px 0 8px; }
+  .trip:first-child { margin-top: 0; }
+  .trip-sub { font-size: 11.5px; color: var(--dim); margin: -4px 0 8px; opacity: .8; }
+  .group-toggle { display: flex; gap: 6px; margin-bottom: 14px; }
+  .group-toggle button { font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .card {
+    padding: 0; overflow: hidden; border-radius: 9px; display: flex; flex-direction: column;
+    align-items: stretch; text-align: left; background: rgba(255,255,255,.04);
+  }
+  .card img { width: 100%; aspect-ratio: 2/1; object-fit: cover; display: block; background: #0a0d11; }
+  .card span { padding: 5px 7px; font-size: 11.5px; color: var(--dim); }
+  .card.bad { outline: 1px solid rgba(224,112,95,.5); }
+
+  #status {
+    position: fixed; z-index: 9; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 18px; color: var(--dim); backdrop-filter: blur(8px); max-width: 80vw; text-align: center;
+  }
+
+  #hint { color: var(--dim); font-size: 11.5px; opacity: .72; }
+
+  /* ---- print panel ---- */
+  .panel {
+    position: fixed; z-index: 8; top: 0; bottom: 0; left: 0; width: min(380px, 92vw);
+    background: var(--panel-solid); border-right: 1px solid var(--line);
+    padding: 16px; overflow-y: auto; transform: translateX(-100%);
+    transition: transform .28s cubic-bezier(.4,0,.2,1); display: flex; flex-direction: column; gap: 12px;
+  }
+  body.printing .panel { transform: none; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+  .panel-head button { padding: 2px 9px; }
+  .field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--dim); }
+  .field.two { flex-direction: row; gap: 10px; }
+  .field.two label { flex: 1; }
+  .field.row { flex-direction: row; align-items: center; gap: 8px; }
+  .field label { display: flex; flex-direction: column; gap: 4px; }
+  .field label:has(input[type=radio]) { flex-direction: row; align-items: center; gap: 6px; color: var(--text); }
+  .field select, .field input[type=text] {
+    font: inherit; color: var(--text); background: rgba(255,255,255,.055);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px;
+  }
+  button.primary { background: rgba(91,176,255,.22); border-color: rgba(91,176,255,.6); color: #cfe6ff; }
+  #pState { font-size: 12px; color: var(--dim); }
+  .warn { font-size: 12px; color: var(--ok); border: 1px solid rgba(216,178,74,.35); border-radius: 8px; padding: 8px 10px; }
+  #pProofImg { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+  #pResult { font-size: 12.5px; color: var(--dim); line-height: 1.5; }
+  #pResult a { color: var(--accent); }
+  @media (max-width: 640px) {
+    #meta, #hint { display: none; }
+    input[type=range] { width: 110px; }
+  }
+</style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="top" class="chrome">
+    <span id="title">—</span>
+    <span id="quality" class="quality" style="display:none"></span>
+    <span id="meta"></span>
+    <span class="spacer"></span>
+    <a id="mapLink" href="#" target="_blank" rel="noopener" style="display:none">map ↗</a>
+    <button id="printBtn" title="Print this view or the whole panorama" style="display:none">Print…</button>
+    <button id="spinBtn" title="Slowly orbit the view (Space)">Auto-spin</button>
+    <button id="fsBtn" title="Fullscreen (F)">Fullscreen</button>
+    <button id="browseBtn" title="Browse the library">Browse</button>
+  </div>
+
+  <div id="bottom" class="chrome">
+    <div id="nearby" style="display:none"></div>
+    <div id="modes"></div>
+    <div id="modeBlurb"></div>
+    <div id="sliders">
+      <label class="sl" id="morphRow">Little-planet pull
+        <input type="range" id="morph" min="0" max="1" step="0.005" value="0">
+      </label>
+      <label class="sl" id="globeRow" style="display:none">Distance
+        <input type="range" id="globeDist" min="1.25" max="9" step="0.05" value="2.6">
+      </label>
+      <label class="sl">Exposure
+        <input type="range" id="exposure" min="0.25" max="3" step="0.01" value="1">
+      </label>
+      <span id="hint">drag to look · scroll to zoom · space spin · h hide · f fullscreen</span>
+    </div>
+  </div>
+
+  <div id="gallery"></div>
+
+  <!-- Print panel: only shown when the page is served by `panolib view`, which injects
+       a per-session token below. A static copy of this page has no token and no API. -->
+  <div id="printPanel" class="panel">
+    <div class="panel-head">
+      <span>Print</span>
+      <button id="printClose" title="Close">×</button>
+    </div>
+    <div class="field">
+      <label><input type="radio" name="psrc" value="view" checked> This view</label>
+      <label><input type="radio" name="psrc" value="equirect"> Whole panorama</label>
+    </div>
+    <div class="field two">
+      <label>Size <select id="pSize"></select></label>
+      <label>Dpi <select id="pDpi"><option>300</option><option>180</option></select></label>
+    </div>
+    <div class="field two">
+      <label>Style <select id="pStyle"><option>gallery</option><option>survey</option><option>overlay</option></select></label>
+      <label>Fit <select id="pFit"><option>contain</option><option>cover</option></select></label>
+    </div>
+    <div class="field">
+      <label>Title <input id="pTitle" type="text" placeholder="derived from location if left blank" maxlength="120"></label>
+    </div>
+    <div class="field row">
+      <button id="pProof">Proof</button>
+      <button id="pPrint" class="primary">Print</button>
+      <span id="pState"></span>
+    </div>
+    <div id="pWarn" class="warn" style="display:none"></div>
+    <img id="pProofImg" alt="" style="display:none">
+    <div id="pResult" style="display:none"></div>
+  </div>
+
+  <div id="status" style="display:none"></div>
+  <meta name="print-token" content="__PRINT_TOKEN__">
+
+  <script type="importmap">
+  { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

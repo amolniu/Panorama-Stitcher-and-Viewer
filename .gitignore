@@ -1,0 +1,21 @@
+# Built library: stitched panoramas, previews, prints and the viewer copy that
+# `python -m panolib build` writes. Regenerated from the source archive; 1.6 GB.
+out/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Node: only `package.json`/`package-lock.json` are kept, as the record of the
+# three.js version vendored into viewer/vendor/.
+node_modules/
+
+# Local editor / assistant state
+.claude/settings.local.json
+
+# Temporaries the print pipeline may leave on an interrupted run
+*.part
+*.prev
+*.tmp
+nohup.out
