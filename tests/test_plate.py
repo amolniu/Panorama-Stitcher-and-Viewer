@@ -68,19 +68,42 @@ def test_precision_is_not_overstated():
 
 # ------------------------------------------------------------------ altitude & heading
 
-def test_altitudes_are_distinguished():
-    """The two altitudes must never be collapsed into one unlabelled number."""
+def test_plate_altitude_is_height_above_launch_only():
+    """The sea-level figure is barometric and drifts with the weather (the same spot read
+    39 m apart on consecutive days; some files record a drone below sea level), so the
+    plate prints only height above launch -- labelled, never a bare "altitude"."""
     rows = build_rows(_cap(lat=51.5, lon=-0.1, alt_msl=206.58, alt_agl=19.4))
     alt = next(r for r in rows if r.label == "Altitude")
-    assert "above sea level" in alt.value
-    assert "above launch" in alt.value
-    assert "207" in alt.value and "19" in alt.value
+    assert alt.value == "19 m above launch", alt.value
+    assert not any("sea level" in r.value or "207" in r.value for r in rows)
+    # a negative sea-level reading never reaches the face
+    rows = build_rows(_cap(lat=57.2, lon=-5.9, alt_msl=-108.8, alt_agl=3.2))
+    assert next(r for r in rows if r.label == "Altitude").value == "3 m above launch"
+
+
+def test_sea_level_alone_is_not_printed():
+    rows = build_rows(_cap(lat=1.0, lon=2.0, alt_msl=200.0, alt_agl=None))
+    assert not any(r.label == "Altitude" for r in rows)
 
 
 def test_altitude_rounds_to_metres():
     assert format_altitude(206.58) == "207 m"
     assert format_altitude(19.4) == "19 m"
     assert format_altitude(19.4, "ft") == "64 ft"
+    assert format_altitude(2.5) == "3 m"          # half away from zero, not banker's
+    assert format_altitude(-0.2) == "0 m"         # never "-0 m"
+    assert format_altitude(-0.6) == "-1 m"
+
+
+def test_flying_below_the_take_off_point_reads_as_below():
+    """Panoramas flown down into a gorge record a negative height above launch; the
+    plate says "below launch" rather than printing a minus sign or a "-0"."""
+    def alt(v):
+        return next(r for r in build_rows(_cap(lat=1.0, lon=2.0, alt_agl=v)) if r.label == "Altitude").value
+    assert alt(-25.4) == "25 m below launch"
+    assert alt(-0.4) == "0 m above launch"
+    assert alt(-0.6) == "1 m below launch"
+    assert alt(42.0) == "42 m above launch"
 
 
 def test_missing_altitude_is_omitted_not_invented():
@@ -421,6 +444,209 @@ def test_derived_place_is_not_a_recorded_field():
     for r in rows:
         assert "Greenwich" not in r.value
         assert r.label in ("Position", "Altitude", "Recorded", "Camera")
+
+
+# ------------------------------------------------------------------ metadata in the print file
+# Synthetic values throughout -- an invented position and a fake serial -- so these tests
+# carry no real flight data.
+
+FAKE_SERIAL = "TESTSERIAL0001"
+
+
+def _exif_cap(**kw) -> Capture:
+    base = dict(lat=12.3456789, lon=-45.6789012, alt_msl=224.779, alt_agl=86.5,
+                captured="2026:08:28 19:30:08", make="DJI", model="FC7303",
+                serial=FAKE_SERIAL)
+    base.update(kw)
+    return _cap(**base)
+
+
+def _save_with_exif(cap, include=None, ext=".jpg", dpi=100):
+    import tempfile
+    from PIL import Image
+    from panolib.plate import print_exif, save_print
+    path = os.path.join(tempfile.mkdtemp(prefix="pano_exif_"), "print" + ext)
+    ok = save_print(Image.new("RGB", (120, 90), (90, 120, 150)), path,
+                    parse_size("5x7", dpi, "landscape"), exif=print_exif(cap, include))
+    return path, ok
+
+
+def _read_exif(path):
+    """(IFD0, Exif IFD, GPS IFD, info) read back with Pillow."""
+    from PIL import ExifTags, Image
+    with Image.open(path) as im:
+        ex = im.getexif()
+        return (dict(ex), dict(ex.get_ifd(ExifTags.IFD.Exif)),
+                dict(ex.get_ifd(ExifTags.IFD.GPSInfo)), dict(im.info),
+                dict(ex.get_ifd(ExifTags.IFD.IFD1)))
+
+
+def _deg(t, ref) -> float:
+    d, m, s = (float(x) for x in t)
+    v = d + m / 60 + s / 3600
+    return -v if ref in ("S", "W") else v
+
+
+def _byte(v) -> int:
+    return v[0] if isinstance(v, (bytes, tuple)) else int(v)
+
+
+def test_print_file_carries_the_recorded_position_time_and_camera():
+    """A print is a new file; without this, photo apps see a picture with no place or
+    date. The values must be the camera's own, not the plate's rounded ones."""
+    from PIL import ExifTags
+    G, B = ExifTags.GPS, ExifTags.Base
+    path, ok = _save_with_exif(_exif_cap())
+    assert ok
+    ifd0, sub, gps, info, _ = _read_exif(path)
+    assert gps[G.GPSLatitudeRef] == "N" and gps[G.GPSLongitudeRef] == "W"
+    assert abs(_deg(gps[G.GPSLatitude], "N") - 12.3456789) < 1e-9
+    assert abs(_deg(gps[G.GPSLongitude], "W") - (-45.6789012)) < 1e-9
+    assert _byte(gps[G.GPSAltitudeRef]) == 0 and abs(float(gps[G.GPSAltitude]) - 224.779) < 1e-9
+    assert sub[B.DateTimeOriginal] == "2026:08:28 19:30:08"
+    assert ifd0[B.Make] == "DJI" and ifd0[B.Model] == "FC7303" and ifd0[B.Software] == "panolib"
+    # the print size is stated the same way in both headers
+    assert float(ifd0[B.XResolution]) == 100 and ifd0[B.ResolutionUnit] == 2
+    assert tuple(round(v) for v in info["dpi"]) == (100, 100)
+    # and exiftool -- what every other tool here trusts -- reads the same values back
+    try:
+        from panolib.exif import find_exiftool
+        exe = find_exiftool(None)
+    except Exception:
+        return
+    from panolib.capture import read_capture
+    back = read_capture(path, exe)
+    assert abs(back.lat - 12.3456789) < 1e-9 and abs(back.lon + 45.6789012) < 1e-9, (back.lat, back.lon)
+    assert abs(back.alt_msl - 224.779) < 1e-6 and back.captured == "2026:08:28 19:30:08"
+    assert back.make == "DJI" and back.model == "FC7303" and back.serial is None
+
+
+def test_print_file_never_carries_the_serial_projection_orientation_or_thumbnail():
+    from PIL import ExifTags
+    path, _ = _save_with_exif(_exif_cap())
+    with open(path, "rb") as fh:
+        data = fh.read()
+    assert FAKE_SERIAL.encode() not in data, "the aircraft serial must never be written"
+    assert b"GPano" not in data and b"equirectangular" not in data
+    ifd0, _, _, info, ifd1 = _read_exif(path)
+    assert not info.get("xmp")
+    assert ExifTags.Base.Orientation not in ifd0
+    assert not ifd1, "no thumbnail: the source's would show a different picture"
+
+
+def test_print_metadata_southern_eastern_and_below_sea_level():
+    """Signs live in the reference tags. Some DJI files really do record a negative
+    'above sea level'; the file keeps saying what the camera said."""
+    from PIL import ExifTags
+    G = ExifTags.GPS
+    _, _, gps, _, _ = _read_exif(_save_with_exif(_exif_cap(lat=-33.5, lon=151.25, alt_msl=-16.79))[0])
+    assert gps[G.GPSLatitudeRef] == "S" and gps[G.GPSLongitudeRef] == "E"
+    assert abs(_deg(gps[G.GPSLatitude], "S") + 33.5) < 1e-9
+    assert abs(_deg(gps[G.GPSLongitude], "E") - 151.25) < 1e-9
+    assert _byte(gps[G.GPSAltitudeRef]) == 1 and abs(float(gps[G.GPSAltitude]) - 16.79) < 1e-9
+
+
+def test_print_metadata_follows_the_plates_fields():
+    """The file never discloses more than the face of the print: leave position off the
+    plate and the GPS position stays out of the file too."""
+    from PIL import ExifTags
+    G, B = ExifTags.GPS, ExifTags.Base
+    _, sub, gps, _, _ = _read_exif(_save_with_exif(_exif_cap(), include={"altitude", "recorded"})[0])
+    assert G.GPSLatitude not in gps and G.GPSLongitude not in gps
+    assert G.GPSAltitude in gps and B.DateTimeOriginal in sub
+    ifd0, sub, gps, _, _ = _read_exif(_save_with_exif(_exif_cap(), include=set())[0])
+    assert not gps and B.DateTimeOriginal not in sub
+    assert ifd0[B.Model] == "FC7303"                     # the camera is not location data
+    _, _, gps, _, _ = _read_exif(_save_with_exif(_exif_cap(lat=None, lon=None))[0])
+    assert G.GPSLatitude not in gps                      # nothing recorded, nothing written
+
+
+def test_print_metadata_carries_rounded_seconds_and_skips_a_malformed_time():
+    from PIL import ExifTags
+    path, _ = _save_with_exif(_exif_cap(lat=10.9999999999999, captured="28 Aug 2026 19:30"))
+    _, sub, gps, _, _ = _read_exif(path)
+    d, m, s = (float(x) for x in gps[ExifTags.GPS.GPSLatitude])
+    assert s < 60 and m < 60, (d, m, s)
+    assert abs(_deg(gps[ExifTags.GPS.GPSLatitude], "N") - 11.0) < 1e-9
+    assert ExifTags.Base.DateTimeOriginal not in sub, "a malformed time must not be written"
+
+
+def test_png_and_tiff_prints_carry_the_metadata_too():
+    """PNG goes through Pillow like JPEG. Pillow's compressed-TIFF writer cannot write
+    the GPS block, so TIFF goes through exiftool -- and says so when it cannot."""
+    from PIL import ExifTags
+    path, ok = _save_with_exif(_exif_cap(), ext=".png")
+    _, _, gps, _, _ = _read_exif(path)
+    assert ok and abs(_deg(gps[ExifTags.GPS.GPSLatitude], "N") - 12.3456789) < 1e-9
+    path, ok = _save_with_exif(_exif_cap(), ext=".tif")
+    try:
+        from panolib.exif import find_exiftool
+        exe = find_exiftool(None)
+    except Exception:
+        assert ok is False, "without exiftool a TIFF must report that GPS was not embedded"
+        return
+    assert ok
+    from PIL import Image
+    from panolib.capture import read_capture
+    back = read_capture(path, exe)
+    assert abs(back.lat - 12.3456789) < 1e-7 and abs(back.lon + 45.6789012) < 1e-7
+    assert back.captured == "2026:08:28 19:30:08" and back.model == "FC7303"
+    assert back.serial is None
+    with Image.open(path) as im:                          # the image itself is untouched
+        assert im.size == (120, 90) and im.info.get("compression") == "tiff_lzw"
+        assert tuple(round(v) for v in im.info["dpi"]) == (100, 100)
+
+
+def test_cli_print_embeds_the_metadata_unless_position_is_left_off():
+    """End to end through `python -m panolib print`, from a photo that records a
+    position, a time, a camera and a serial."""
+    import glob
+    import subprocess
+    import tempfile
+    from PIL import ExifTags, Image
+    from PIL.TiffImagePlugin import IFDRational
+    try:
+        from panolib.exif import find_exiftool
+        find_exiftool(None)
+    except Exception:
+        return                                            # the CLI reads sources with exiftool
+    G, B = ExifTags.GPS, ExifTags.Base
+    tmp = tempfile.mkdtemp(prefix="pano_cli_exif_")
+    src = os.path.join(tmp, "DJI_9999.JPG")
+    ex = Image.Exif()
+    ex[B.Make], ex[B.Model] = "DJI", "FC7303"
+    sub = ex.get_ifd(ExifTags.IFD.Exif)
+    sub[B.DateTimeOriginal] = "2026:08:28 19:30:08"
+    sub[0xA431] = FAKE_SERIAL
+    ex.get_ifd(ExifTags.IFD.GPSInfo).update({
+        G.GPSVersionID: b"\x02\x03\x00\x00",
+        G.GPSLatitudeRef: "N", G.GPSLatitude: (IFDRational(12, 1), IFDRational(20, 1), IFDRational(444, 10)),
+        G.GPSLongitudeRef: "W", G.GPSLongitude: (IFDRational(45, 1), IFDRational(40, 1), IFDRational(444, 10)),
+        G.GPSAltitudeRef: 0, G.GPSAltitude: IFDRational(224779, 1000)})
+    Image.new("RGB", (600, 400), (70, 110, 90)).save(src, format="JPEG", exif=ex)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+
+    def run(out, *extra):
+        proc = subprocess.run([sys.executable, "-m", "panolib", "print", src, "--size", "5x7",
+                               "--dpi", "72", "--no-place", "--out", out, "--out-dir", tmp, *extra],
+                              cwd=root, env=env, capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        hits = glob.glob(os.path.join(out, "*.jpg"))
+        assert len(hits) == 1, (hits, proc.stdout)
+        return hits[0]
+
+    full = run(os.path.join(tmp, "full"))
+    ifd0, sub, gps, _, _ = _read_exif(full)
+    assert abs(_deg(gps[G.GPSLatitude], "N") - (12 + 20 / 60 + 44.4 / 3600)) < 1e-9
+    assert abs(_deg(gps[G.GPSLongitude], "W") + (45 + 40 / 60 + 44.4 / 3600)) < 1e-9
+    assert sub[B.DateTimeOriginal] == "2026:08:28 19:30:08" and ifd0[B.Model] == "FC7303"
+    with open(full, "rb") as fh:
+        assert FAKE_SERIAL.encode() not in fh.read()
+    hidden = run(os.path.join(tmp, "no-position"), "--fields", "altitude,recorded")
+    _, sub, gps, _, _ = _read_exif(hidden)
+    assert G.GPSLatitude not in gps and G.GPSLongitude not in gps
+    assert sub[B.DateTimeOriginal] == "2026:08:28 19:30:08"
 
 
 def _main() -> int:

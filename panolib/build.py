@@ -23,6 +23,11 @@ from .stitch import (StitchResult, crop_to_coverage, fill_zenith, linear_to_srgb
 from .tonemap import dynamic_range, local_tonemap
 
 CACHE_VERSION = 5  # bump when output would change, to invalidate cached results
+#: Bump when what write_gpano writes changes. Unlike CACHE_VERSION this re-stitches
+#: nothing: a cached panorama whose tags are older is re-tagged in place on the next
+#: build. Without it a metadata fix silently never reaches panoramas already stitched --
+#: which is how the signed DJI altitude added in version 2 went missing from all 135.
+META_VERSION = 2
 
 
 @dataclass
@@ -104,7 +109,11 @@ def write_gpano(path: str, exiftool: str, *, img_w: int, img_h: int,
                      f"-GPSLatitudeRef={'N' if tile.lat >= 0 else 'S'}",
                      f"-GPSLongitudeRef={'E' if tile.lon >= 0 else 'W'}"]
         if tile.altitude is not None:
-            args.append(f"-GPSAltitude={tile.altitude}")
+            # EXIF stores GPS altitude as a magnitude plus a separate above/below sea
+            # level flag. Writing the number alone dropped the sign: a tile that recorded
+            # 108.8 m BELOW sea level came out 108.8 m above. Write both halves.
+            args += [f"-GPS:GPSAltitude#={abs(tile.altitude)}",
+                     f"-GPS:GPSAltitudeRef#={1 if tile.altitude < 0 else 0}"]
         # Height above the launch point is the number people mean by "how high was it",
         # and it is not derivable from GPSAltitude. Carry it through so the finished
         # panorama describes itself without needing the library manifest alongside.
@@ -124,6 +133,31 @@ def write_gpano(path: str, exiftool: str, *, img_w: int, img_h: int,
         return proc.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def retag_if_stale(cached: dict, eq_path: str, meta_path: str,
+                   tiles: list[TileMeta], exiftool: str | None) -> bool:
+    """Bring a cached panorama's tags up to META_VERSION in place. True if it re-tagged.
+
+    Only the metadata is rewritten (exiftool does not touch the image data), from the
+    same tiles and the same geometry the build recorded, so the result is what a fresh
+    build would write. The meta record is updated so this happens once.
+    """
+    if not exiftool or not tiles or cached.get("meta_version", 1) >= META_VERSION:
+        return False
+    cov = cached.get("coverage") or {}
+    if not (cached.get("width") and cached.get("height")):
+        return False
+    ok = write_gpano(eq_path, exiftool, img_w=int(cached["width"]), img_h=int(cached["height"]),
+                     lon_span=float(cov.get("lon_span", 360.0)),
+                     lat_max=float(cov.get("lat_max", 90.0)),
+                     tile_count=len(tiles), tile=tiles[0])
+    if ok:
+        cached["meta_version"] = META_VERSION
+        with open(meta_path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump({k: v for k, v in cached.items() if k != "cached"}, fh, indent=2)
+        os.replace(meta_path + ".tmp", meta_path)
+    return ok
 
 
 def _resize(arr: np.ndarray, width: int) -> np.ndarray:
@@ -202,6 +236,7 @@ def build_one(pano: PanoSet, opts: BuildOptions,
             if os.path.exists(meta_path):
                 with open(meta_path, "r", encoding="utf-8") as fh:
                     cached = json.load(fh)
+                retag_if_stale(cached, eq_path, meta_path, tiles, exiftool)
                 cached["cached"] = True
                 return cached
 
@@ -243,10 +278,10 @@ def build_one(pano: PanoSet, opts: BuildOptions,
         lat_min_deg = 90.0 - ((_rows[-1] + 1) / h_img) * 180.0
 
         _save_jpeg(eq_path, cropped, opts.quality_jpeg)
-        if exiftool:
-            write_gpano(eq_path, exiftool, img_w=cropped.shape[1], img_h=cropped.shape[0],
-                        lon_span=deg_h, lat_max=lat_max_deg, tile_count=len(tiles),
-                        tile=tiles[0])
+        if exiftool and write_gpano(eq_path, exiftool, img_w=cropped.shape[1],
+                                    img_h=cropped.shape[0], lon_span=deg_h,
+                                    lat_max=lat_max_deg, tile_count=len(tiles), tile=tiles[0]):
+            entry["meta_version"] = META_VERSION
         _save_jpeg(pv_path, _resize(cropped, opts.preview_width), 84)
         _save_jpeg(th_path, _resize(cropped, opts.thumb_width), 78)
         if opts.make_planet and cls.mode == "sphere":

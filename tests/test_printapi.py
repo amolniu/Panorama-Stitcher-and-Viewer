@@ -26,6 +26,50 @@ from panolib.printapi import BadRequest, validate
 
 _SERVER = {}
 
+GPS_FIXTURE = {
+    "lat": 12.3456789, "lon": -45.6789012, "alt": 123.456,
+    "when": "2025:05:06 07:08:09", "make": "DJI", "model": "FC7303",
+    "serial": "FIXTURESERIAL9",
+    "xmp": (b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
+            b'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description '
+            b'xmlns:GPano="http://ns.google.com/photos/1.0/panorama/" '
+            b'GPano:ProjectionType="equirectangular" GPano:UsePanoramaViewer="True"/>'
+            b'</rdf:RDF></x:xmpmeta>'),
+}
+
+
+def _gps_fixture_exif():
+    """The source's EXIF, built from raw tags -- deliberately not with print_exif, so the
+    code under test is not also the oracle."""
+    from fractions import Fraction
+    from PIL import ExifTags
+    from PIL.TiffImagePlugin import IFDRational
+
+    def dms(v):
+        v = abs(v)
+        d = int(v)
+        m = int((v - d) * 60)
+        s = Fraction(((v - d) * 60 - m) * 60).limit_denominator(10_000)
+        return (IFDRational(d, 1), IFDRational(m, 1), IFDRational(s.numerator, s.denominator))
+
+    f = GPS_FIXTURE
+    ex = Image.Exif()
+    ex[ExifTags.Base.Make] = f["make"]
+    ex[ExifTags.Base.Model] = f["model"]
+    ex[ExifTags.Base.Orientation] = 1
+    sub = ex.get_ifd(ExifTags.IFD.Exif)
+    sub[ExifTags.Base.DateTimeOriginal] = f["when"]
+    sub[0xA431] = f["serial"]                            # BodySerialNumber, as DJI writes it
+    alt = Fraction(f["alt"]).limit_denominator(1000)
+    ex.get_ifd(ExifTags.IFD.GPSInfo).update({
+        ExifTags.GPS.GPSVersionID: b"\x02\x03\x00\x00",
+        ExifTags.GPS.GPSLatitudeRef: "N", ExifTags.GPS.GPSLatitude: dms(f["lat"]),
+        ExifTags.GPS.GPSLongitudeRef: "W", ExifTags.GPS.GPSLongitude: dms(f["lon"]),
+        ExifTags.GPS.GPSAltitudeRef: 0,
+        ExifTags.GPS.GPSAltitude: IFDRational(alt.numerator, alt.denominator),
+    })
+    return ex
+
 
 def _fixture_dir() -> str:
     """A tiny library with one real (synthetic) equirect and a placeholder index."""
@@ -40,12 +84,20 @@ def _fixture_dir() -> str:
     img[..., 1] = (LAT > 0) * 200 + 30
     img[..., 2] = 90
     Image.fromarray(img).save(os.path.join(d, "panoramas", "p1", "eq.jpg"), quality=90)
+    # A second panorama that records what a real one does -- position, altitude, time,
+    # camera -- plus the two things a print must NOT inherit: an aircraft serial and the
+    # 360 projection tags. All values are synthetic.
+    os.makedirs(os.path.join(d, "panoramas", "p2"), exist_ok=True)
+    Image.fromarray(img).save(os.path.join(d, "panoramas", "p2", "eq.jpg"), quality=90,
+                              exif=_gps_fixture_exif(), xmp=GPS_FIXTURE["xmp"])
     cov = {"lon_min": -180, "lon_max": 180, "lat_min": -90, "lat_max": 90}
     lib = {"panoramas": [{"id": "test-pano-1", "name": "100_0001", "status": "ok",
                           "equirect": "panoramas/p1/eq.jpg", "trip": "Test", "coverage": cov},
                          # same folder NAME, different panorama -- as 20 library entries are
                          {"id": "test-pano-1b", "name": "100_0001", "status": "ok",
-                          "equirect": "panoramas/p1/eq.jpg", "trip": "Test", "coverage": cov}]}
+                          "equirect": "panoramas/p1/eq.jpg", "trip": "Test", "coverage": cov},
+                         {"id": "test-pano-gps", "name": "100_0002", "status": "ok",
+                          "equirect": "panoramas/p2/eq.jpg", "trip": "Test", "coverage": cov}]}
     with open(os.path.join(d, "library.json"), "w", encoding="utf-8") as fh:
         json.dump(lib, fh)
     with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as fh:
@@ -968,6 +1020,52 @@ def test_proof_renders_and_is_served():
 
 def test_unknown_job_is_404():
     assert _req("GET", "/api/jobs/nope")[0] == 404
+
+
+def _dms_value(t, ref):
+    d, m, s = (float(x) for x in t)
+    v = d + m / 60 + s / 3600
+    return -v if ref in ("S", "W") else v
+
+
+def test_viewer_prints_keep_the_recorded_position_time_and_camera():
+    """A print from the panel -- a framed view or the whole panorama -- carries what the
+    panorama records (position, altitude, capture time, camera), and neither the aircraft
+    serial nor the tags that would make photo apps treat the print as a 360."""
+    from PIL import ExifTags
+    s = _server()
+    f = GPS_FIXTURE
+    src = os.path.join(s["out"], "panoramas", "p2", "eq.jpg")
+    with open(src, "rb") as fh:
+        raw = fh.read()
+    # preconditions: the source really does carry what must not travel
+    assert f["serial"].encode() in raw and b"GPano" in raw, "fixture lost its serial/GPano"
+    G, B = ExifTags.GPS, ExifTags.Base
+    for source in ("view", "equirect"):
+        code, body = _req("POST", "/api/print",
+                          _good_body(id="test-pano-gps", source=source, proof=False,
+                                     size="5x7", dpi=100, title="Metadata check"),
+                          {"X-Print-Token": s["ctx"].token})
+        assert code == 202, (code, body)
+        j = _finish(body)
+        assert j["state"] == "done", j
+        path = j["result"]["path"]
+        with Image.open(path) as im:
+            ex = im.getexif()
+            gps, sub = ex.get_ifd(ExifTags.IFD.GPSInfo), ex.get_ifd(ExifTags.IFD.Exif)
+            assert gps.get(G.GPSLatitudeRef) == "N" and gps.get(G.GPSLongitudeRef) == "W", (source, dict(gps))
+            assert abs(_dms_value(gps[G.GPSLatitude], "N") - f["lat"]) < 1e-6, source
+            assert abs(_dms_value(gps[G.GPSLongitude], "W") - f["lon"]) < 1e-6, source
+            assert abs(float(gps[G.GPSAltitude]) - f["alt"]) < 1e-3, source
+            assert sub.get(B.DateTimeOriginal) == f["when"], source
+            assert ex.get(B.Make) == f["make"] and ex.get(B.Model) == f["model"], source
+            assert ex.get(B.Software) == "panolib", source
+            assert tuple(round(v) for v in im.info["dpi"]) == (100, 100), source
+        with open(path, "rb") as fh:
+            out = fh.read()
+        assert f["serial"].encode() not in out, f"{source}: the aircraft serial must not travel"
+        assert b"GPano" not in out and b"equirectangular" not in out, \
+            f"{source}: a print must not claim to be a 360"
 
 
 def _main() -> int:

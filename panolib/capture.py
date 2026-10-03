@@ -13,7 +13,9 @@ Two rules shape all of it:
 * **Never conflate the two altitudes.** ``GPSAltitude`` is height above sea level;
   ``RelativeAltitude`` is height above the point the drone took off from. They answer
   different questions and differ by hundreds of metres inland. Labelling either one simply
-  "altitude" would be wrong.
+  "altitude" would be wrong. On this aircraft the sea-level figure is barometric and never
+  corrected for the day's air pressure -- tens of metres out, sometimes negative -- so
+  plates print only height above launch; the sea-level value is kept as recorded.
 """
 
 from __future__ import annotations
@@ -185,10 +187,14 @@ def format_latlon(lat: float, lon: float, style: str = "dms") -> tuple[str, str]
 
 
 def format_altitude(metres: float, unit: str = "m") -> str:
-    """Altitudes to the nearest metre. The barometer drifts; decimals would be theatre."""
-    if unit == "ft":
-        return f"{metres * 3.280839895:,.0f} ft"
-    return f"{metres:,.0f} m"
+    """Altitudes to the nearest metre. The barometer drifts; decimals would be theatre.
+
+    Rounded half away from zero (format's banker's rounding would make 2.5 m "2 m"), and
+    never "-0": a reading of -0.2 m is 0 m.
+    """
+    v = metres * 3.280839895 if unit == "ft" else metres
+    r = int(math.floor(abs(v) + 0.5))
+    return f"{-r if v < 0 else r:,} {'ft' if unit == 'ft' else 'm'}"
 
 
 _COMPASS = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",

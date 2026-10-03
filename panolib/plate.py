@@ -10,11 +10,15 @@ the data buried in metadata nobody reads.
 
 from __future__ import annotations
 
+import math
 import os
+import re
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import ExifTags, Image, ImageDraw
+from PIL.TiffImagePlugin import IFDRational
 
 from .capture import (Capture, format_altitude, format_datetime, format_exposure,
                       format_heading, format_latlon)
@@ -22,6 +26,10 @@ from .paper import FitReport, Paper, assess_fit, fit_box
 from .typeset import (TypeScale, draw_small_caps, draw_tracked, load_font, text_width)
 
 Image.MAX_IMAGE_PIXELS = None
+
+#: The caption's data block when no fields are named. The print file's metadata follows
+#: the same set (see print_exif), so it is defined once.
+DEFAULT_FIELDS = frozenset({"position", "altitude", "recorded"})
 
 
 @dataclass
@@ -88,8 +96,8 @@ FOOTNOTE = ("Position, altitude and time as recorded by the camera at capture. "
 
 FOOTNOTE_FULL = (
     "Every value above is transcribed from metadata inside the source file. Coordinates are "
-    "WGS 84 from the aircraft's satellite receiver, good to a few metres. Heights are "
-    "barometric, one measured from the take-off point and one from sea level. Camera "
+    "WGS 84 from the aircraft's satellite receiver, good to a few metres. Height is "
+    "barometric, measured from the take-off point. Camera "
     "direction is the aircraft's compass, not corrected for magnetic declination. The clock "
     "is the camera's own and records no time zone. Metadata of this kind can be edited with "
     "free tools: this plate reports what the file records. It is not a verification, a "
@@ -144,23 +152,24 @@ def build_rows(cap: Capture, *, units: str = "m", include: set[str] | None = Non
     """
     # `include or {...}` would be wrong: an empty set is falsy, so asking for NO fields
     # would silently get the default three back.
-    inc = {"position", "altitude", "recorded"} if include is None else include
+    inc = DEFAULT_FIELDS if include is None else include
     rows: list[PlateRow] = []
 
     if "position" in inc and cap.has_position:
         lat_s, lon_s = format_latlon(cap.lat, cap.lon, "dms")
         rows.append(PlateRow("Position", f"{lat_s}   {lon_s}"))
 
-    if "altitude" in inc:
-        parts = []
-        # The two altitudes answer different questions and differ by hundreds of metres
-        # inland, so each carries its own datum rather than being called "altitude".
-        if cap.alt_msl is not None:
-            parts.append(f"{format_altitude(cap.alt_msl, units)} above sea level")
-        if cap.alt_agl is not None:
-            parts.append(f"{format_altitude(cap.alt_agl, units)} above launch")
-        if parts:
-            rows.append(PlateRow("Altitude", "   ·   ".join(parts)))
+    if "altitude" in inc and cap.alt_agl is not None:
+        # Height above the take-off point only. The aircraft's "above sea level" figure is
+        # barometric and never corrected for the day's air pressure: two flights from the
+        # same spot on Skye put the ground 39 m apart on consecutive days, and nine
+        # panoramas in the archive record a drone BELOW sea level. A plate states what a
+        # reader can check, so that figure stays in the file's metadata and the sidecar.
+        # Flying down from a take-off point -- into a gorge, off a cliff -- gives a
+        # negative reading, which reads as "below launch", not "-25 m above launch".
+        below = format_altitude(cap.alt_agl, units).startswith("-")
+        rows.append(PlateRow("Altitude", f"{format_altitude(abs(cap.alt_agl), units)} "
+                                         f"{'below' if below else 'above'} launch"))
 
     if "recorded" in inc:
         when = format_datetime(cap.captured)
@@ -453,21 +462,148 @@ def _render_overlay(cap: Capture, source: Image.Image, paper: Paper, st: PlateSt
     return img, report
 
 
+SOFTWARE = "panolib"
+_EXIF_DATETIME = re.compile(r"\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}")
+
+
+def _dms_rationals(value: float) -> tuple[IFDRational, IFDRational, IFDRational]:
+    """|value| as EXIF degree/minute/second rationals, the seconds to a micro-arcsecond.
+
+    That carries the camera's own figure through unchanged (DJI records the seconds to
+    four decimals). The plate rounds for a reader; the file does not round at all.
+    """
+    v = abs(value)
+    d = int(v)
+    m_full = (v - d) * 60.0
+    m = int(m_full)
+    s = Fraction((m_full - m) * 60.0).limit_denominator(1_000_000)
+    # rounding can carry into the minutes, and the minutes into the degrees
+    if s >= 60:
+        s -= 60
+        m += 1
+    if m >= 60:
+        m -= 60
+        d += 1
+    return IFDRational(d, 1), IFDRational(m, 1), IFDRational(s.numerator, s.denominator)
+
+
+def print_exif(cap: Capture, include: set[str] | None = None) -> Image.Exif:
+    """The metadata a print file carries: what the source records, as far as the plate shows it.
+
+    A print is a new file, so nothing comes across unless it is written here -- and what
+    is written is chosen, never a wholesale copy of the source's tags:
+
+    * Position and capture time when the plate shows them, and the altitude the aircraft
+      recorded above sea level when the plate shows altitude. They follow the same
+      ``include`` fields as the caption, so the file never discloses more than the face of
+      the print: leave position off the plate and the GPS stays out of the file too. These
+      are what put the print on the map and in the timeline of a photo library.
+    * The camera make and model, and ``Software=panolib`` so the file does not pass for
+      a camera original.
+    * Never the aircraft serial number: it identifies the owner and would link every
+      print to every other. Never the panorama projection tags: a matted print is not an
+      equirectangular image, and photo apps would wrap it round a sphere. Never the
+      source's orientation or thumbnail, which describe a different picture.
+
+    The plate prints height above launch, which has no standard EXIF tag; it is on the
+    plate and in the sidecar. The sea-level figure is left off the plate (it is barometric
+    and drifts with the weather) but goes into the file as recorded, sign included: it is
+    the camera's own record, and the file keeps saying what the camera said.
+    """
+    inc = DEFAULT_FIELDS if include is None else include
+    exif = Image.Exif()
+    if cap.make and cap.make.strip():
+        exif[ExifTags.Base.Make] = cap.make.strip()
+    if cap.model and cap.model.strip():
+        exif[ExifTags.Base.Model] = cap.model.strip()
+    exif[ExifTags.Base.Software] = SOFTWARE
+
+    when = (cap.captured or "").strip()
+    if "recorded" in inc and _EXIF_DATETIME.fullmatch(when):
+        sub = exif.get_ifd(ExifTags.IFD.Exif)
+        sub[ExifTags.Base.ExifVersion] = b"0232"
+        sub[ExifTags.Base.DateTimeOriginal] = when
+
+    gps: dict = {}
+    if ("position" in inc and cap.has_position
+            and math.isfinite(cap.lat) and math.isfinite(cap.lon)
+            and abs(cap.lat) <= 90.0 and abs(cap.lon) <= 180.0):
+        gps[ExifTags.GPS.GPSLatitudeRef] = "N" if cap.lat >= 0 else "S"
+        gps[ExifTags.GPS.GPSLatitude] = _dms_rationals(cap.lat)
+        gps[ExifTags.GPS.GPSLongitudeRef] = "E" if cap.lon >= 0 else "W"
+        gps[ExifTags.GPS.GPSLongitude] = _dms_rationals(cap.lon)
+    if "altitude" in inc and cap.alt_msl is not None and math.isfinite(cap.alt_msl):
+        alt = Fraction(abs(cap.alt_msl)).limit_denominator(1000)       # millimetres
+        gps[ExifTags.GPS.GPSAltitudeRef] = 0 if cap.alt_msl >= 0 else 1  # 1 = below sea level
+        gps[ExifTags.GPS.GPSAltitude] = IFDRational(alt.numerator, alt.denominator)
+    if gps:
+        exif.get_ifd(ExifTags.IFD.GPSInfo).update(
+            {ExifTags.GPS.GPSVersionID: b"\x02\x03\x00\x00", **gps})
+    return exif
+
+
+def _embed_exif_with_exiftool(path: str, exif: Image.Exif, exiftool: str | None) -> bool:
+    """TIFF only: write ``exif`` into an existing file. True on success.
+
+    Pillow's compressed-TIFF writer cannot produce the EXIF and GPS sub-directories, so
+    the block goes through exiftool instead, copied from a one-pixel carrier JPEG that
+    holds exactly what print_exif built. The image data and its compression are not
+    touched.
+    """
+    import subprocess
+    import tempfile
+    from .exif import ExifToolMissing, find_exiftool
+    try:
+        exe = find_exiftool(exiftool)
+    except ExifToolMissing:
+        return False
+    fd, carrier = tempfile.mkstemp(prefix="panolib-exif-", suffix=".jpg")
+    os.close(fd)
+    try:
+        Image.new("RGB", (1, 1)).save(carrier, format="JPEG", exif=exif)
+        proc = subprocess.run([exe, "-q", "-q", "-charset", "filename=utf8",
+                               "-overwrite_original", "-tagsFromFile", carrier,
+                               "-EXIF:all", path],
+                              capture_output=True, timeout=120)
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    finally:
+        try:
+            os.remove(carrier)
+        except OSError:
+            pass
+
+
 def save_print(image: Image.Image, path: str, paper: Paper, *,
-               jpeg_quality: int = 95) -> None:
+               jpeg_quality: int = 95, exif: Image.Exif | None = None,
+               exiftool: str | None = None) -> bool:
     """Write the plate with the DPI recorded, so a lab prints it at the intended size.
 
     Without the dpi tag the file is just a pixel grid and the print size is whatever the
-    lab assumes.
+    lab assumes. ``exif`` (built by print_exif) goes into the same file, in the same
+    write for JPEG and PNG; the resolution is added to it so the EXIF and JFIF headers
+    agree on the print size.
+
+    Returns False only when metadata was asked for and could not be embedded, which can
+    happen for TIFF alone (it needs exiftool). The print itself is written either way.
     """
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     # a temporary name such as ``plate.jpg.part`` keeps the format of the real name
     final = path[:-len(".part")] if path.endswith(".part") else path
     ext = os.path.splitext(final)[1].lower()
-    params = {"dpi": (paper.dpi, paper.dpi)}
+    params: dict = {"dpi": (paper.dpi, paper.dpi)}
+    if exif is not None:
+        exif[ExifTags.Base.XResolution] = IFDRational(paper.dpi, 1)
+        exif[ExifTags.Base.YResolution] = IFDRational(paper.dpi, 1)
+        exif[ExifTags.Base.ResolutionUnit] = 2                         # inches
     if ext in (".tif", ".tiff"):
         image.save(path, format="TIFF", compression="tiff_lzw", **params)
-    elif ext == ".png":
+        return exif is None or _embed_exif_with_exiftool(path, exif, exiftool)
+    if exif is not None:
+        params["exif"] = exif
+    if ext == ".png":
         image.save(path, format="PNG", **params)
     else:
         image.save(path, format="JPEG", quality=jpeg_quality, subsampling=0, optimize=True, **params)
+    return True

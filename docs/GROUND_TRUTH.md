@@ -325,3 +325,28 @@ peak sits at +t. An earlier derivation negated this and the injected-error test 
 immediately - recovered +0.915 deg where -1.000 was required. Do not "fix" the sign by
 inspection; run tests/test_refine.py, which injects a known error and demands the exact
 negative back.
+
+## 14. ALTITUDE - only height above launch is trustworthy (measured 2026-10-03)
+
+Each DJI file records two heights: GPSAltitude with GPSAltitudeRef (and the same value as
+XMP drone-dji:AbsoluteAltitude), and XMP drone-dji:RelativeAltitude, height above the
+take-off point.
+
+- The sea-level figure is barometric and is NOT corrected for the day's air pressure, so it
+  drifts with the weather. Panoramas 100_0220 and 100_0333 were flown from the same spot on
+  Skye (11 m apart) on 6 and 7 July 2022; subtracting each one's height above launch puts
+  that ground at -73 m and -112 m. Within a single day at one spot the implied ground height
+  is steady (median spread 0 m, max 15 m over 16 cases), which is why above-launch is good.
+- 9 of 142 panoramas record a drone BELOW sea level (8 in Scotland). Physically impossible
+  there; it is the barometric offset.
+- Consequence: plates print only "N m above launch". The sea-level value is kept, as
+  recorded and with its sign, in print EXIF and in the sidecar (with a note).
+- Write trap: GPS altitude is a magnitude plus a separate above/below flag. Writing
+  -GPSAltitude=-108.8 with exiftool stores 108.8 and no flag, which reads as ABOVE sea level.
+  Write both: -GPS:GPSAltitude#=108.8 -GPS:GPSAltitudeRef#=1. Until 2026-10-03 build.py wrote
+  only the magnitude, so the stitched files of the 9 negatives (and 16 Scotland plates)
+  showed the wrong sign.
+- Cache trap: build.py reuses already-stitched panoramas, so a change to write_gpano never
+  reached them (the XMP drone-dji fields added on 2026-09-30 were missing from all 135).
+  META_VERSION in build.py now re-tags stale cached panoramas in place on the next build,
+  without re-stitching.

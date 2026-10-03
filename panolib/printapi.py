@@ -44,7 +44,7 @@ from PIL import Image
 from .capture import enrich_from_library, file_digest, read_capture
 from .geonames import nearest_place
 from .paper import NAMED_SIZES, Paper, assess_fit, parse_size
-from .plate import STYLES, render, save_print, view_box
+from .plate import STYLES, print_exif, render, save_print, view_box
 from .project import (VIEW_MODES, View, heading_of_view, native_view_width, render_view,
                       TWO_PI)
 
@@ -606,7 +606,10 @@ def run_print(ctx: PrintContext, req: dict, progress) -> dict:
     jpg = os.path.join(dest_dir, stem + ".jpg")
     part = jpg + ".part"
     try:
-        save_print(plate, part, paper, jpeg_quality=80 if req["proof"] else 95)
+        # the recorded position, altitude and time go into the file as well as onto the
+        # plate (the panel always prints the default fields, so all three are shown)
+        save_print(plate, part, paper, jpeg_quality=80 if req["proof"] else 95,
+                   exif=print_exif(cap))
     except BaseException:
         _remove_with_backoff(part)
         raise

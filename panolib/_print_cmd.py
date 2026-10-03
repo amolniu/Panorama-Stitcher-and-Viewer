@@ -13,7 +13,7 @@ from PIL import Image
 from .capture import enrich_from_library, file_digest, map_url, read_capture
 from .geonames import nearest_place
 from .paper import MAX_UPSCALE, assess_fit, fit_box, max_print_size, parse_size
-from .plate import STYLES, build_rows, render, save_print
+from .plate import STYLES, build_rows, print_exif, render, save_print
 from .scan import make_id
 
 Image.MAX_IMAGE_PIXELS = None
@@ -135,6 +135,10 @@ def write_sidecar(path: str, cap, extra: dict) -> None:
             "map_url": map_url(cap.lat, cap.lon),
         },
         "altitude_m": {"above_sea_level": cap.alt_msl, "above_launch": cap.alt_agl},
+        "altitude_note": ("above_sea_level is the aircraft's barometric reading as recorded. "
+                          "It is not corrected for the day's air pressure and can be tens of "
+                          "metres out; some files record a negative value. above_launch is "
+                          "the reliable figure, and the one printed on the plate."),
         "captured_local": cap.captured,
         "timezone": "not recorded by the camera",
         "heading_deg": cap.camera_heading,
@@ -231,7 +235,10 @@ def cmd_print(args: argparse.Namespace, default_out: str) -> int:
             # stem is unique per source (see resolve_targets); friendly is for the console
             ext = ".tif" if args.format == "tiff" else (".png" if args.format == "png" else ".jpg")
             dest = os.path.join(dest_dir, stem + "-" + paper.name + "-" + style + ext)
-            save_print(plate, dest, paper, jpeg_quality=args.jpeg_quality)
+            # The file carries the recorded position, altitude and time too -- as far as
+            # the plate shows them, so --fields without position keeps GPS out of it.
+            embedded = save_print(plate, dest, paper, jpeg_quality=args.jpeg_quality,
+                                  exif=print_exif(cap, fields), exiftool=args.exiftool)
 
             mb = os.path.getsize(dest) / 1e6
             print("  ok    " + os.path.basename(dest)
@@ -239,6 +246,9 @@ def cmd_print(args: argparse.Namespace, default_out: str) -> int:
                       plate.width, plate.height, report.effective_dpi, mb))
             if report.warning:
                 print("        ! " + report.warning)
+            if not embedded:
+                print("        ! GPS and capture time are on the plate but not in the TIFF "
+                      "file's metadata: writing them needs exiftool")
 
             if args.sidecar:
                 write_sidecar(os.path.splitext(dest)[0] + ".json", cap, {

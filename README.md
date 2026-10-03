@@ -134,7 +134,20 @@ its basename plus a hash of its path. The eight digits are there because names a
 collide — in this archive 20 DJI folder names are used by more than one panorama (43 of
 the 135 folders), and camera-roll names (`DJI_0001.JPG`) restart on every card — and a
 print must never be overwritten by a different photograph that happens to share its name.
-Re-printing the *same* source replaces its own file. Three styles:
+Re-printing the *same* source replaces its own file.
+
+The print file also carries the source's metadata where photo apps look for it, so it
+lands on the map and in the timeline of Apple Photos, Google Photos or Lightroom: the GPS
+position, the capture time and the altitude above sea level, exactly as the camera
+recorded them (the plate rounds for a reader; the file does not), plus the camera make
+and model and `Software: panolib`, so it never passes for a camera original. Location and
+time follow the plate: if `--fields` leaves position off the face of the print, the GPS
+stays out of the file too — the file never discloses more than the print does. Never
+copied: the aircraft serial number, the panorama projection tags (a matted print is not a
+360, and photo apps would wrap it round a sphere), and the source's orientation and
+thumbnail. Height above launch has no standard tag, so it stays on the plate and in the
+sidecar. JPEG and PNG get this in the same write; TIFF gets it through exiftool. Three
+styles:
 
 - **`gallery`** (default) — light mat, caption below the image. The photograph is never
   covered, and the print has a border to trim to.
@@ -247,9 +260,12 @@ claim from editing one field to making a whole photograph agree with it.
 Some limits are worth knowing. The coordinates come from the aircraft's own satellite
 receiver and are good to a few metres, so the plate never prints more than one decimal of
 arc-second (about 3 m) — printing six decimal places would imply a survey-grade fix that
-does not exist. Both heights are barometric, and the two are never conflated: one is
-measured from sea level, the other from wherever the aircraft took off, and they differ by
-hundreds of metres inland. The clock is the camera's own and carries no time zone, so the
+does not exist. The plate's altitude is height above the take-off point, which is good to a
+metre or two. The aircraft also records a height above sea level, but it is barometric and
+never corrected for the day's air pressure: two flights from the same spot on Skye put the
+ground 39 m apart on consecutive days, and nine panoramas in this archive record a drone
+below sea level. So the plate leaves it off; the file's metadata and the sidecar keep it as
+recorded. The clock is the camera's own and carries no time zone, so the
 time is printed as recorded rather than converted. A stitched panorama says so, because a
 plate attesting provenance while implying one untouched exposure would undercut itself.
 
