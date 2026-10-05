@@ -95,6 +95,19 @@ def test_altitude_rounds_to_metres():
     assert format_altitude(-0.6) == "-1 m"
 
 
+def test_a_single_panorama_frame_is_one_exposure_not_a_panorama():
+    """DJI marks every frame of a panorama set Type=P. Printed alone, a 4:3 frame is one
+    exposure with a real bearing; only wider Type=P images and 2:1 stitched outputs are
+    composites."""
+    from panolib.capture import is_composite
+    assert not is_composite("Type=P, Mode=P, DE=None", 2000, 1500)    # a frame from a set
+    assert not is_composite("Type=P, Mode=P, DE=None", 4000, 3000)
+    assert is_composite("Type=P, Mode=P, DE=None", 7000, 2000)        # stitched by DJI Fly
+    assert is_composite(None, 8192, 4096)                              # stitched here
+    assert not is_composite("Type=N, Mode=P, DE=None", 4000, 2250)    # an ordinary photo
+    assert not is_composite("Type=P", 0, 0)                            # size unknown
+
+
 def test_flying_below_the_take_off_point_reads_as_below():
     """Panoramas flown down into a gorge record a negative height above launch; the
     plate says "below launch" rather than printing a minus sign or a "-0"."""

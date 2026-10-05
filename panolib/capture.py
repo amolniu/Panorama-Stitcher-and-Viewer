@@ -137,10 +137,24 @@ def read_capture(path: str, exiftool: str | None = None) -> Capture:
         exposure_time=as_opt_float(rec.get("ExposureTime")),
         iso=as_opt_float(rec.get("ISO")),
         focal_35=as_opt_float(rec.get("FocalLengthIn35mmFormat")),
-        # DJI marks panorama source tiles Type=P and ordinary frames Type=N. A stitched
-        # output from this tool is 2:1 and very wide, so fall back to the shape.
-        is_panorama=("Type=P" in xp) or (w >= 4000 and h and abs(w / h - 2.0) < 0.02),
+        is_panorama=is_composite(xp, w, h),
     )
+
+
+def is_composite(xp_comment: str | None, width: int, height: int) -> bool:
+    """Is this image several frames merged into one?
+
+    DJI writes ``Type=P`` into every frame it shoots for a panorama, so a single source
+    frame -- 4:3 like any one exposure -- carries the marker too. Printed on its own it is
+    one exposure with one real bearing, not a panorama. Only a ``Type=P`` image that is
+    not 4:3 (a panorama DJI Fly stitched itself) or this tool's own 2:1 output is a
+    composite.
+    """
+    if not (width and height):
+        return False
+    if width >= 4000 and abs(width / height - 2.0) < 0.02:
+        return True
+    return "Type=P" in (xp_comment or "") and abs(width / height - 4 / 3) > 0.02
 
 
 # --------------------------------------------------------------------- formatting
