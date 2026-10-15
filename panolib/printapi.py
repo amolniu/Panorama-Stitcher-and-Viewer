@@ -256,6 +256,7 @@ def validate(body) -> dict:
             fov=_num(v.get("fov", 75.0), 10.0, 330.0, "fov"),
             morph=_num(v.get("morph", 0.0), 0.0, 1.0, "morph"),
             exposure=_num(v.get("exposure", 1.0), 0.25, 3.0, "exposure"),
+            globe_dist=_num(v.get("globeDist", 2.6), 1.25, 9.0, "globeDist"),
         )
         screen_aspect = _num(v.get("aspect", 1.5), 0.2, 5.0, "aspect")
 
@@ -280,6 +281,10 @@ def _request_key(req: dict, title: str | None, paper: Paper) -> str:
     and portrait, and a view print's orientation follows the browser window.
     """
     view = dataclasses.asdict(req["view"]) if req["view"] else None
+    if view and view.get("mode") != "globe":
+        # the globe's distance means nothing to other views; leaving it out keeps their
+        # filenames exactly what they were before the globe could be printed
+        view.pop("globe_dist", None)
     key = json.dumps({"id": req["id"], "paper": [paper.width_in, paper.height_in, paper.dpi],
                       "fit": req["fit"], "title": title, "style": req["style"],
                       "source": req["source"], "view": view}, sort_keys=True)
@@ -586,7 +591,10 @@ def run_print(ctx: PrintContext, req: dict, progress) -> dict:
             report = assess_fit(native_w, native_h, box_w, box_h,
                                 (0, 0, native_w, native_h), paper)
             hdg = round(heading_of_view(view)) % 360
-            tag = f"view{hdg:03d}-{math.degrees(view.pitch):+03.0f}-f{view.fov:.0f}"
+            if view.mode == "globe":
+                tag = f"globe{hdg:03d}-{math.degrees(view.pitch):+03.0f}-d{view.globe_dist:.1f}"
+            else:
+                tag = f"view{hdg:03d}-{math.degrees(view.pitch):+03.0f}-f{view.fov:.0f}"
         else:
             paper = parse_size(req["size"], dpi, "auto", eq_w / max(eq_h, 1))
             check_paper(paper)
@@ -637,6 +645,8 @@ def run_print(ctx: PrintContext, req: dict, progress) -> dict:
                              "exposure": round(v.exposure, 3),
                              "note": "A rendered framing of the panorama, not a camera frame. "
                                      "'view facing' on the plate is this framing's bearing."}
+            if v.mode == "globe":
+                extra["view"]["globe_distance"] = round(v.globe_dist, 3)
         try:
             write_sidecar(side_part, cap, extra)
         except BaseException:

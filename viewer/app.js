@@ -528,7 +528,7 @@ function wireControls() {
 // per-session token into the <meta name="print-token"> tag. A static copy of the page
 // has the placeholder instead, so the button simply stays hidden there.
 
-const VIEW_PRINTABLE = new Set(['immersive', 'planet', 'tunnel', 'fisheye', 'pannini']);
+const VIEW_PRINTABLE = new Set(['immersive', 'globe', 'planet', 'tunnel', 'fisheye', 'pannini']);
 const PRINT_SIZES = ['a4', 'a3', 'a2', '8x10', '11x14', '12x18', '16x20', '16x24',
                      '20x30', '24x36', 'pano-2to1', 'pano-3to1', 'square'];
 
@@ -546,6 +546,7 @@ function currentView() {
     pitch: state.pitch, roll: state.roll,
     fov: state.fov, morph: state.morph,
     exposure: state.exposure,          // "print what I see" includes the slider
+    globeDist: state.globeDist,        // the globe's distance slider and wheel zoom
     aspect: (canvas.clientWidth || 3) / (canvas.clientHeight || 2),
   };
 }
@@ -585,7 +586,7 @@ function syncPrintPanel() {
   const eqRadio = document.querySelector('input[name="psrc"][value="equirect"]');
   viewRadio.disabled = !viewOk;
   viewRadio.parentElement.title = viewOk ? ''
-    : 'This mode is a diagnostic layout; switch to Immersive, Little Planet, Tunnel, Fisheye or Pannini to print a view.';
+    : 'Flat, Mercator, Mirror Ball and Cube Cross are reference layouts of the whole sphere; switch to Immersive, Globe, Little Planet, Tunnel, Fisheye or Pannini to print a view, or print the whole panorama.';
   if (!viewOk) eqRadio.checked = true;
   const title = document.getElementById('pTitle');
   if (!title.value && state.entry?.location) {

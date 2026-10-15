@@ -266,6 +266,64 @@ def test_minification_is_measured_not_estimated():
         assert abs(m - base) < 1e-3, (roll, m, base)
 
 
+# ------------------------------------------------------------------ globe
+
+def test_globe_centre_shows_the_point_opposite_the_camera():
+    """The globe is the literal inverse of the immersive view: facing north, the ball's
+    centre shows SOUTH; turned to face south, it shows north."""
+    pano = _marker_equirect(180.0, 0.0, radius_deg=8.0)            # a marker due south
+    out = _f(render_view(pano, View(mode="globe", yaw=0.0, fov=45.0), 200, 200,
+                         background=(0.0, 0.0, 0.0)))
+    assert out[100, 100].mean() > 0.8, out[100, 100]
+    out = _f(render_view(pano, View(mode="globe", yaw=math.pi, fov=45.0), 200, 200,
+                         background=(0.0, 0.0, 0.0)))
+    assert out[100, 100].mean() < 0.1, out[100, 100]
+
+
+def test_globe_shading_and_background_match_the_shader():
+    pano = np.ones((H, W, 3), dtype=np.float32)
+    out = _f(render_view(pano, View(mode="globe", fov=45.0), 200, 200,
+                         background=(0.0, 0.0, 0.0)))
+    # at the centre the surface faces the camera: n = (0, 0, -1), and the shader's light
+    # is normalize(-0.4, 0.5, -1.0), so n.L = 0.842152 and the shade 0.78 + 0.22 n.L
+    assert abs(out[100, 100].mean() - (0.78 + 0.22 * 0.842152)) < 0.01, out[100, 100]
+    assert out[2, 2].max() == 0.0, "a corner ray misses the ball and shows background"
+    assert out[60, 60].mean() > out[140, 140].mean(), "lit from the upper left"
+
+
+def test_globe_ball_shrinks_with_distance():
+    pano = np.ones((H, W, 3), dtype=np.float32)
+
+    def ball(dist):
+        out = _f(render_view(pano, View(mode="globe", fov=45.0, globe_dist=dist), 100, 100,
+                             background=(0.0, 0.0, 0.0)))
+        return int((out.mean(axis=2) > 0.5).sum())
+    assert ball(5.0) < 0.5 * ball(2.6)
+
+
+def test_globe_native_width_is_its_centre_resolution():
+    """At the ball's centre one pixel spans (dist - 1) * 2 tan(fov/2) / H radians of the
+    sphere, so a square frame is 1:1 at (dist - 1) * tan(fov/2) * W / pi pixels."""
+    w = native_view_width(8192, View(mode="globe", fov=45.0, globe_dist=2.6), aspect=1.0)
+    expect = 1.6 * math.tan(math.radians(22.5)) * 8192 / math.pi        # 1728
+    assert abs(w - expect) <= 1, (w, expect)
+    assert native_view_width(8192, View(mode="globe", fov=45.0, globe_dist=9.0), aspect=1.0) > w
+
+
+def test_globe_strips_match_a_whole_render():
+    import panolib.project as P
+    pano = _equirect_quadrants()
+    v = View(mode="globe", yaw=0.4, pitch=0.3, fov=45.0)
+    whole = _f(render_view(pano, v, 80, 60))
+    old = P.STRIP_PIXELS
+    try:
+        P.STRIP_PIXELS = 160 * 6                                    # several strips
+        strips = _f(render_view(pano, v, 80, 60))
+    finally:
+        P.STRIP_PIXELS = old
+    assert np.abs(strips - whole).max() < 1e-6
+
+
 def test_heading_of_view_is_compass():
     assert heading_of_view(View(yaw=0.0)) == 0.0
     assert abs(heading_of_view(View(yaw=math.radians(90))) - 90.0) < 1e-9

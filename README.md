@@ -185,6 +185,12 @@ stretched sky, but a chosen framing is simply a photograph of the place. The pla
 its bearing as *view facing*, not *camera facing*, because it is a fact about the print
 rather than something the camera recorded.
 
+*This view* works in Immersive, Globe, Little Planet, Tunnel, Fisheye and Pannini — each
+reproduced at print resolution with the viewer's own projection maths, including the
+globe's distance and lighting. Flat, Mercator, Mirror Ball and Cube Cross are reference
+layouts of the whole sphere, so the panel offers *Whole panorama* for those. Prints leave
+out the screen's soft edge-darkening.
+
 **Proof** renders a quick low-resolution preview in the panel; **Print** writes the full
 file to `out/prints/from-viewer/` with its sidecar, and links to it. Both use exactly the
 code the command line uses, so the output is identical. "The view you are looking at"

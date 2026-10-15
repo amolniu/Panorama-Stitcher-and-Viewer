@@ -296,6 +296,45 @@ def test_title_is_cleaned_of_format_and_control_characters():
     assert "<b>" in req["title"]          # markup is kept as TEXT; the page renders it as text
 
 
+def test_globe_views_are_accepted_and_their_distance_is_bounded():
+    req = validate(_good_body(view={"mode": "globe", "yaw": 1.0, "fov": 45, "globeDist": 50}))
+    assert req["view"].mode == "globe" and req["view"].globe_dist == 9.0
+    assert validate(_good_body(view={"mode": "globe"}))["view"].globe_dist == 2.6
+
+
+def test_globe_distance_only_changes_globe_filenames():
+    """Other views ignore the globe's distance, so their filenames are exactly what they
+    were before the globe became printable."""
+    import dataclasses
+    import hashlib
+    from panolib.paper import parse_size
+    paper = parse_size("5x7", 100, "landscape")
+
+    def key(view):
+        return printapi._request_key(validate(_good_body(view=view)), None, paper)
+    assert key({"mode": "immersive", "globeDist": 2.6}) == key({"mode": "immersive", "globeDist": 7.0})
+    assert key({"mode": "globe", "globeDist": 2.6}) != key({"mode": "globe", "globeDist": 7.0})
+    # and the immersive key is the one the code produced before the field existed
+    req = validate(_good_body(view={"mode": "immersive"}))
+    old_view = {k: v for k, v in dataclasses.asdict(req["view"]).items() if k != "globe_dist"}
+    old = hashlib.sha1(json.dumps({"id": req["id"], "paper": [paper.width_in, paper.height_in, paper.dpi],
+                                   "fit": req["fit"], "title": None, "style": req["style"],
+                                   "source": req["source"], "view": old_view},
+                                  sort_keys=True).encode("utf-8")).hexdigest()[:6]
+    assert printapi._request_key(req, None, paper) == old
+
+
+def test_globe_view_prints_and_is_named_as_a_globe():
+    s = _server()
+    code, body = _req("POST", "/api/print",
+                      _good_body(view={"mode": "globe", "fov": 45, "globeDist": 2.6, "aspect": 1.5}),
+                      {"X-Print-Token": s["ctx"].token})
+    assert code == 202, (code, body)
+    j = _finish(body)
+    assert j["state"] == "done", j
+    assert "-globe000-" in os.path.basename(j["result"]["path"]), j["result"]["path"]
+
+
 def test_yaw_is_wrapped_not_clamped():
     req = validate(_good_body(view={"mode": "immersive", "yaw": 100.0}))   # ~16 turns
     import math as _m

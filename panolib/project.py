@@ -25,7 +25,11 @@ TWO_PI = 2.0 * math.pi
 
 #: Viewer modes that are photographic framings and can be printed as a view.
 #: (flat, mercator, mirror and cube are diagnostic layouts; print the equirect instead.)
-VIEW_MODES = {"immersive", "planet", "tunnel", "fisheye", "pannini"}
+VIEW_MODES = {"immersive", "globe", "planet", "tunnel", "fisheye", "pannini"}
+
+#: The shader's fixed light for the globe, from the upper left and in front, in camera
+#: space -- so the ball always reads as a solid object whichever way it is turned.
+GLOBE_LIGHT = np.array([-0.4, 0.5, -1.0]) / np.linalg.norm([-0.4, 0.5, -1.0])
 
 
 @dataclass
@@ -42,10 +46,12 @@ class View:
     morph: float = 0.0      # 0 rectilinear .. 1 stereographic (immersive mode only)
     pannini_d: float = 1.0
     exposure: float = 1.0   # the viewer's exposure slider; "print what I see" honours it
+    globe_dist: float = 2.6  # globe only: camera distance from the ball's centre, in radii
 
     @property
     def shader_mode(self) -> int:
-        return {"immersive": 0, "planet": 1, "tunnel": 1, "fisheye": 1, "pannini": 3}.get(self.mode, 0)
+        return {"immersive": 0, "planet": 1, "tunnel": 1, "fisheye": 1, "pannini": 3,
+                "globe": 6}.get(self.mode, 0)
 
 
 def screen_grid(width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
@@ -85,11 +91,39 @@ def dirs_pannini(X, Y, fov_rad: float, d: float) -> tuple[np.ndarray, np.ndarray
     return dirs, valid
 
 
+def dirs_globe(X, Y, fov_rad: float, dist: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The shader's globe: the panorama painted on a unit ball seen from OUTSIDE.
+
+    The camera sits at ``(0, 0, -dist)`` looking down +Z at the ball. Each pixel's ray is
+    intersected with the ball; the direction is the ball's normal at the NEAR hit point,
+    which is the literal inverse of the immersive view -- the centre of the ball shows the
+    point opposite the way the camera faces. Returns (camera-frame directions, valid,
+    shade): rays that miss the ball are invalid and render as background, and ``shade`` is
+    the shader's diffuse light, ``0.78 + 0.22 * max(0, n . L)``.
+    """
+    rd = dirs_rectilinear(X, Y, fov_rad)
+    b = -dist * rd[..., 2]                       # dot(ro, rd) with ro = (0, 0, -dist)
+    disc = b * b - (dist * dist - 1.0)
+    valid = disc >= 0.0
+    t = -b - np.sqrt(np.maximum(disc, 0.0))
+    pt = rd * t[..., None]
+    pt[..., 2] -= dist
+    d = pt / np.linalg.norm(pt, axis=-1, keepdims=True)
+    d[~valid] = (0.0, 0.0, 1.0)                  # as the shader does for a miss
+    shade = 0.78 + 0.22 * np.clip(d @ GLOBE_LIGHT, 0.0, 1.0)
+    return d, valid, shade.astype(np.float32)
+
+
 def _directions_for_grid(view: View, X: np.ndarray, Y: np.ndarray,
-                         R: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """World directions for an arbitrary grid of screen coordinates."""
+                         R: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """World directions for an arbitrary grid of screen coordinates.
+
+    Returns (directions, valid, shade); ``shade`` is None except for the globe, whose
+    surface is lit.
+    """
     fov = math.radians(view.fov)
     valid = np.ones(X.shape, dtype=bool)
+    shade = None
     if view.shader_mode == 0:
         d = dirs_rectilinear(X, Y, fov)
         if view.morph > 0.001:
@@ -100,16 +134,19 @@ def _directions_for_grid(view: View, X: np.ndarray, Y: np.ndarray,
         d = dirs_stereographic(X, Y, fov)
     elif view.shader_mode == 3:
         d, valid = dirs_pannini(X, Y, fov, view.pannini_d)
+    elif view.shader_mode == 6:
+        d, valid, shade = dirs_globe(X, Y, fov, view.globe_dist)
     else:
         raise ValueError(f"mode {view.mode!r} cannot be printed as a view")
-    return d @ R.T, valid
+    return d @ R.T, valid, shade
 
 
 def view_directions(view: View, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
     """World-space unit directions for every pixel of a ``width`` x ``height`` render."""
     X, Y = screen_grid(width, height)
     R = camera_matrix(view.yaw, view.pitch, view.roll)
-    return _directions_for_grid(view, X, Y, R)
+    d, valid, _ = _directions_for_grid(view, X, Y, R)
+    return d, valid
 
 
 def sample_equirect_bilinear(pano: np.ndarray, dirs: np.ndarray,
@@ -194,10 +231,13 @@ def render_view(pano: np.ndarray, view: View, width: int, height: int,
         y1 = min(H2, y0 + rows_per_strip)
         ys = 1.0 - (np.arange(y0, y1, dtype=np.float64) + 0.5) / H2 * 2.0
         X, Y = np.meshgrid(xs, ys)
-        dirs, valid = _directions_for_grid(view, X, Y, R)
+        dirs, valid, shade = _directions_for_grid(view, X, Y, R)
         img, inside = sample_equirect_bilinear(pano32, dirs, lon_range, lat_range)
         ok = valid & inside
-        img = np.where(ok[..., None], img * np.float32(exposure), bg)
+        lit = img * np.float32(exposure)
+        if shade is not None:
+            lit = lit * shade[..., None]
+        img = np.where(ok[..., None], lit, bg)
         if ss == 2:
             img = img.reshape((y1 - y0) // 2, 2, width, 2, 3).mean(axis=(1, 3))
         out[y0 // ss:y1 // ss] = np.clip(img * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
@@ -227,7 +267,7 @@ def minification(pano_shape, view: View, width: int, height: int,
 
     def lonlat(px, py):
         X, Y = np.meshgrid((px / width * 2.0 - 1.0) * aspect, 1.0 - py / height * 2.0)
-        d, valid = _directions_for_grid(view, X, Y, R)
+        d, valid, _ = _directions_for_grid(view, X, Y, R)
         return (np.arctan2(d[..., 0], d[..., 2]), np.arcsin(np.clip(d[..., 1], -1, 1)), valid)
 
     lon0, lat0, v0 = lonlat(gx, gy)
@@ -270,6 +310,14 @@ def native_view_width(equirect_width: int, view: View, aspect: float = 1.5,
     estimate, never above the equirect's own width.
     """
     px_per_rad = equirect_width / max(lon_span, 1e-4)
+    if view.shader_mode == 6:
+        # Globe: finest at the ball's centre, where the surface faces the camera at a
+        # distance of (dist - 1) radii. One output pixel spans (dist - 1) * 2 tan(fov/2) / H
+        # radians of the sphere there, so the centre is 1:1 at
+        # H = (dist - 1) * tan(fov/2) * W / pi -- the box's width is aspect times that.
+        fov_v = math.radians(max(1.0, min(view.fov, 170.0)))
+        h_native = max(view.globe_dist - 1.0, 1e-3) * math.tan(fov_v / 2.0) * px_per_rad * 2.0
+        return int(min(equirect_width, round(max(aspect, 0.05) * h_native)))
     fov_v = math.radians(max(1.0, min(view.fov, 170.0)))
     if view.shader_mode == 1 or view.fov > 120:
         fov_v = math.radians(120.0)
