@@ -249,6 +249,29 @@ def test_wrong_host_header_is_refused():
         assert code == 421, (method, path, code)
 
 
+def test_viewer_code_is_revalidated_but_images_cache_normally():
+    s = _server()
+    with open(os.path.join(s["out"], "app.js"), "w", encoding="utf-8") as fh:
+        fh.write("// viewer")
+
+    def headers(path, extra=None):
+        r = urllib.request.Request(s["base"] + path, headers=extra or {})
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, resp.headers.get_all("Cache-Control") or []
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get_all("Cache-Control") or []
+
+    # without this a browser keeps running an old app.js after the viewer is updated
+    assert headers("/app.js") == (200, ["no-cache"])
+    assert headers("/library.json") == (200, ["no-cache"])
+    assert headers("/") == (200, ["no-store"]), "the index keeps its own, single header"
+    assert headers("/panoramas/p1/eq.jpg") == (200, [])
+    # revalidating an unchanged file stays a cheap 304 and still says no-cache
+    code, cc = headers("/app.js", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})
+    assert (code, cc) == (304, ["no-cache"])
+
+
 def test_directory_listing_is_off():
     s = _server()
     try:

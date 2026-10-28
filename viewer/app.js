@@ -225,6 +225,8 @@ function applyMode(key, resetView) {
   morphRow.style.display = m.morph ? '' : 'none';
   const globeRow = document.getElementById('globeRow');
   globeRow.style.display = (m.key === 'globe') ? '' : 'none';
+  // The Print panel stays open while the view changes; keep "This view" in step.
+  if (document.body.classList.contains('printing')) syncPrintPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +589,15 @@ function syncPrintPanel() {
   viewRadio.disabled = !viewOk;
   viewRadio.parentElement.title = viewOk ? ''
     : 'Flat, Mercator, Mirror Ball and Cube Cross are reference layouts of the whole sphere; switch to Immersive, Globe, Little Planet, Tunnel, Fisheye or Pannini to print a view, or print the whole panorama.';
-  if (!viewOk) eqRadio.checked = true;
+  // A reference layout forces "Whole panorama"; going back to a printable view
+  // restores "This view" if that is what was chosen before.
+  if (!viewOk && viewRadio.checked) {
+    eqRadio.checked = true;
+    state.printViewForcedOff = true;
+  } else if (viewOk && state.printViewForcedOff) {
+    viewRadio.checked = true;
+    state.printViewForcedOff = false;
+  }
   const title = document.getElementById('pTitle');
   if (!title.value && state.entry?.location) {
     title.placeholder = `blank = derived (${state.entry.location.town}, ${state.entry.location.region})`;

@@ -687,6 +687,24 @@ def make_handler(ctx: PrintContext):
             self.send_error(403)
             return None
 
+        # The viewer's code has fixed names (app.js, shaders.js), and without a caching
+        # header browsers treat an old copy as fresh for days, so an updated viewer stays
+        # hidden behind the stale one. Make them revalidate; If-Modified-Since keeps it a
+        # cheap 304. Panorama images are content-hashed and left to cache normally.
+        _cache_header_sent = False
+
+        def send_header(self, keyword, value):
+            if keyword.lower() == "cache-control":
+                self._cache_header_sent = True
+            super().send_header(keyword, value)
+
+        def end_headers(self):
+            path = urlparse(self.path).path
+            if not self._cache_header_sent and path.endswith((".js", ".css", ".html", ".json")):
+                self.send_header("Cache-Control", "no-cache")
+            self._cache_header_sent = False   # one handler can serve several requests
+            super().end_headers()
+
         # -- helpers
         def _json(self, code: int, obj) -> None:
             data = json.dumps(obj).encode("utf-8")
